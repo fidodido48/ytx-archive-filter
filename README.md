@@ -42,5 +42,6 @@ Run yt-x, open the results page, then check:
 
 `cat "${TMPDIR:-/tmp}/yt-x-archive-filter-debug.log"`
 
-1. Confirm the test video’s ID is actually in the archive file in yt-dlp format.
-2. If the log says the extension loaded but has no “shim invoked” line, my PATH-wrapper approach missed yt-x’s call path. If the shim is invoked but either flag is false, its filter condition is wrong for the command yt-x uses. The relevant log lines, plus the test video’s archive entry (you can redact the ID), will show which part needs correcting.
+1. Make sure to restart any yt-x instances (if you had them opened) before installation as they won't automatically pick-up new extension.
+2. Confirm the test video’s ID is actually in the archive file in yt-dlp format.
+3. If the log says the extension loaded but has no “shim invoked” line, my PATH-wrapper approach missed yt-x’s call path. If the shim is invoked but either flag is false, its filter condition is wrong for the command yt-x uses. The relevant log lines, plus the test video’s archive entry (you can redact the ID), will show which part needs correcting.
