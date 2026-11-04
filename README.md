@@ -10,7 +10,7 @@ A POSIX-shell extension that checks each result’s video ID against yt-x’s ar
 <ins>**Install and configure**</ins>
 
 1. Clone/install yt-x from https://github.com/Benexl/yt-x github repo.
-2. Save the code as archive-filter.ext in yt-x’s extensions directory:
+2. Save/download archive-filter.ext file in yt-x’s extensions directory:
 
 `mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/yt-x/extensions"
 `
