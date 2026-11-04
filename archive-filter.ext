@@ -1,0 +1,162 @@
+#!/bin/sh
+# Extension: _archive-filter.ext_
+# yt-x extension: hide result IDs listed in a user-selected yt-dlp archive file.
+# The archive file is read only; this extension never writes to it.
+
+# The user can set either CONFIG_ARCHIVE_FILTER_FILE in yt-x's config,
+# or YT_X_ARCHIVE_FILTER_FILE in the environment.
+CONFIG_ARCHIVE_FILTER_FILE="${YT_X_ARCHIVE_FILTER_FILE:-${CONFIG_ARCHIVE_FILTER_FILE:-}}"
+
+if [ -z "$CONFIG_ARCHIVE_FILTER_FILE" ]; then
+    printf '%s\n' \
+        "archive-filter: set CONFIG_ARCHIVE_FILTER_FILE to your archive-file path." >&2
+    return 0
+fi
+
+if [ ! -r "$CONFIG_ARCHIVE_FILTER_FILE" ]; then
+    printf 'archive-filter: cannot read archive file: %s\n' \
+        "$CONFIG_ARCHIVE_FILTER_FILE" >&2
+    return 0
+fi
+
+_YTX_AF_SHIM_DIR="$CLI_CACHE_DIR/archive-filter-bin"
+
+# Don't wrap our own shim if the extension is loaded more than once.
+case ":$PATH:" in
+    *":$_YTX_AF_SHIM_DIR:"*) return 0 ;;
+esac
+
+_YTX_AF_REAL_YTDLP=$(command -v yt-dlp 2>/dev/null) || {
+    printf '%s\n' "archive-filter: yt-dlp not found; extension not enabled." >&2
+    return 0
+}
+
+# Ensure the shim can invoke the real executable even if `command -v`
+# returned a bare command name rather than a path.
+case "$_YTX_AF_REAL_YTDLP" in
+    /*) ;;
+    *)
+        _ytx_af_found=""
+        _ytx_af_old_ifs=$IFS
+        IFS=:
+        for _ytx_af_dir in $PATH; do
+            [ -n "$_ytx_af_dir" ] || _ytx_af_dir=.
+            if [ -x "$_ytx_af_dir/yt-dlp" ] && [ ! -d "$_ytx_af_dir/yt-dlp" ]; then
+                _ytx_af_found="$(cd "$_ytx_af_dir" 2>/dev/null && pwd -P)/yt-dlp"
+                break
+            fi
+        done
+        IFS=$_ytx_af_old_ifs
+
+        if [ -z "$_ytx_af_found" ]; then
+            printf '%s\n' \
+                "archive-filter: could not resolve the yt-dlp executable; extension not enabled." >&2
+            return 0
+        fi
+        _YTX_AF_REAL_YTDLP=$_ytx_af_found
+        ;;
+esac
+
+mkdir -p "$_YTX_AF_SHIM_DIR" || {
+    printf 'archive-filter: cannot create shim directory: %s\n' \
+        "$_YTX_AF_SHIM_DIR" >&2
+    return 0
+}
+
+cat > "$_YTX_AF_SHIM_DIR/yt-dlp" <<'YT_X_ARCHIVE_FILTER_SHIM'
+#!/bin/sh
+
+real=${YT_X_ARCHIVE_FILTER_REAL_YTDLP:?}
+archive=${YT_X_ARCHIVE_FILTER_FILE:-}
+
+# Only filter yt-x-style playlist-result JSON. Leave downloads and other
+# yt-dlp calls alone.
+flat_playlist=false
+single_json=false
+for arg do
+    case "$arg" in
+        --flat-playlist) flat_playlist=true ;;
+        --dump-single-json) single_json=true ;;
+    esac
+done
+
+printf 'shim invoked; flat=%s; single-json=%s\n' \
+    "$flat_playlist" "$single_json" \
+    >> "${TMPDIR:-/tmp}/yt-x-archive-filter-debug.log"
+
+if [ "$flat_playlist" != true ] ||
+   [ "$single_json" != true ] ||
+   [ ! -r "$archive" ]; then
+    exec "$real" "$@"
+fi
+
+tmp=$(mktemp "${TMPDIR:-/tmp}/ytx-archive-filter.XXXXXX") || exec "$real" "$@"
+out="${tmp}.filtered"
+trap 'rm -f "$tmp" "$out"' 0
+
+"$real" "$@" > "$tmp"
+status=$?
+
+# Preserve yt-dlp's output and error status if extraction failed.
+if [ "$status" -ne 0 ]; then
+    cat "$tmp"
+    exit "$status"
+fi
+
+# Standard yt-dlp archive rows are: extractor ID.
+# Compare extractor names case-insensitively; video IDs remain exact.
+if jq --rawfile archive "$archive" '
+    def archive_rows:
+        $archive
+        | split("\n")
+        | map(sub("\r$"; ""))
+        | map(select(length > 0 and (startswith("#") | not)))
+        | map(
+            try capture(
+                "^(?<extractor>[^[:space:]]+)[[:space:]]+(?<id>[^[:space:]]+)"
+            ) catch empty
+          );
+
+    def archive_key($extractor; $id):
+        ($extractor | ascii_downcase) + "\u0000" + $id;
+
+    def is_archived($entry; $index):
+        (($entry.ie_key // $entry.extractor_key // $entry.extractor // "") | tostring)
+            as $extractor
+        | (($entry.id // "") | tostring) as $id
+        | $index | has(archive_key($extractor; $id));
+
+    archive_rows as $rows
+    | ($rows
+       | reduce .[] as $row
+           ({}; .[archive_key($row.extractor; $row.id)] = true)
+      ) as $index
+    | if (.entries | type) == "array" then
+          .entries |= map(select(is_archived(.; $index) | not))
+      else
+          .
+      end
+' "$tmp" > "$out" 2>/dev/null; then
+    cat "$out"
+else
+    # If the output isn't the expected JSON shape, leave it untouched.
+    cat "$tmp"
+fi
+
+exit 0
+YT_X_ARCHIVE_FILTER_SHIM
+
+chmod 700 "$_YTX_AF_SHIM_DIR/yt-dlp" || {
+    printf '%s\n' "archive-filter: could not make the yt-dlp shim executable." >&2
+    return 0
+}
+
+YT_X_ARCHIVE_FILTER_REAL_YTDLP=$_YTX_AF_REAL_YTDLP
+YT_X_ARCHIVE_FILTER_FILE=$CONFIG_ARCHIVE_FILTER_FILE
+export YT_X_ARCHIVE_FILTER_REAL_YTDLP YT_X_ARCHIVE_FILTER_FILE
+
+# yt-x and its child processes will now find the filtering shim first.
+PATH="$_YTX_AF_SHIM_DIR:$PATH"
+export PATH
+printf 'extension loaded; archive=%s\n' "$CONFIG_ARCHIVE_FILTER_FILE" \
+    >> "${TMPDIR:-/tmp}/yt-x-archive-filter-debug.log"
