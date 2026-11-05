@@ -45,3 +45,10 @@ Run yt-x, open the results page, then check:
 1. Make sure to restart any yt-x instances (if you had them opened) before installation as they won't automatically pick-up new extension.
 2. Confirm the test video’s ID is actually in the archive file in yt-dlp format.
 3. If the log says the extension loaded but has no “shim invoked” line, my PATH-wrapper approach missed yt-x’s call path. If the shim is invoked but either flag is false, its filter condition is wrong for the command yt-x uses. The relevant log lines, plus the test video’s archive entry (you can redact the ID), will show which part needs correcting.
+
+__DISCLAIMER__
+--------------
+
+© 2026 fidodido48. This project is licensed under the the MIT License - see the LICENSE file for details.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
