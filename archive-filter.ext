@@ -1,4 +1,5 @@
 #!/bin/sh
+# FILE VERSION: v2
 # yt-x extension: hide result IDs listed in a user-selected yt-dlp archive file.
 # The archive file is read only; this extension never writes to it.
 
