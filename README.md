@@ -3,9 +3,9 @@ yt-dlp's archive-file-based seen/watched videos filter from picker/results for y
 
 A POSIX-shell extension that checks each result’s video ID against yt-x’s archive files and removes matches before they reach the fzf selector. yt-x supports sourced extensions and autoloading them from its config. This extension uses only the archive file you specify—it does not read or update yt-x’s recent/watch history. It intercepts yt-dlp’s flat-playlist JSON, removes entries whose extractor and ID appear in your file, then passes the filtered JSON back to yt-x. yt-x supports POSIX-shell extensions and automatic loading; yt-dlp archive entries use extractor/ID pairs such as youtube VIDEO_ID. 
 
-**IMPORTANT NOTE**: Archived entries are removed from each fetched result batch before the picker displays them. Since filtering happens after yt-x fetches a page, a page may show fewer items than its configured page size. This version does not fetch extra items to fill the gaps.
+<ins>**UPDATED TO V2 NOW**</ins>
 
-
+**(UPDATED) IMPORTANT NOTE/CHANGELOG**: Archived entries are removed from each fetched result batch before the picker displays them, and the remaining results are then shifted up so the list stays contiguous — hiding item #1 makes item #2 the new #1, with no empty slots left behind by the filter.
 
 <ins>**Install and configure**</ins>
 
