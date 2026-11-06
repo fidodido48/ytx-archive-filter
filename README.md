@@ -7,6 +7,10 @@ A POSIX-shell extension that checks each result’s video ID against yt-x’s ar
 
 **(UPDATED) IMPORTANT NOTE/CHANGELOG**: Archived entries are removed from each fetched result batch before the picker displays them, and the remaining results are then shifted up so the list stays contiguous — hiding item #1 makes item #2 the new #1, with no empty slots left behind by the filter.
 
+Whenever filtering removed items from a page, the extension automatically fetches extra items ahead of the requested window so the page still fills up to your configured page size. The extra items are always the natural continuation of the same playlist or search in YouTube's own order — results are only ever shifted, never re-ranked, and never mixed with unrelated videos, so YouTube's relevance ranking stays exactly as it is.
+
+Your pagination setting is respected as-is: the window size is read from yt-dlp's own command line at runtime (whatever CONFIG_PER_PAGE is set to in yt-x's config), never hardcoded or capped. A page can be shorter than the page size only when the playlist genuinely runs out of items. Fetched results are cached per playlist for 15 minutes, so paging back and forth is instant and does not re-download.
+
 <ins>**Install and configure**</ins>
 
 1. Clone/install yt-x from https://github.com/Benexl/yt-x github repo.
