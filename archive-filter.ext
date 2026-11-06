@@ -1,5 +1,4 @@
 #!/bin/sh
-# Extension: _archive-filter.ext_
 # yt-x extension: hide result IDs listed in a user-selected yt-dlp archive file.
 # The archive file is read only; this extension never writes to it.
 
@@ -58,8 +57,8 @@ case "$_YTX_AF_REAL_YTDLP" in
 esac
 
 mkdir -p "$_YTX_AF_SHIM_DIR" || {
-    printf 'archive-filter: cannot create shim directory: %s\n' \
-        "$_YTX_AF_SHIM_DIR" >&2
+    printf '%s\n' \
+        "archive-filter: cannot create shim directory: $_YTX_AF_SHIM_DIR" >&2
     return 0
 }
 
@@ -79,7 +78,6 @@ for arg do
         --dump-single-json) single_json=true ;;
     esac
 done
-
 printf 'shim invoked; flat=%s; single-json=%s\n' \
     "$flat_playlist" "$single_json" \
     >> "${TMPDIR:-/tmp}/yt-x-archive-filter-debug.log"
@@ -90,70 +88,236 @@ if [ "$flat_playlist" != true ] ||
     exec "$real" "$@"
 fi
 
-tmp=$(mktemp "${TMPDIR:-/tmp}/ytx-archive-filter.XXXXXX") || exec "$real" "$@"
-out="${tmp}.filtered"
-trap 'rm -f "$tmp" "$out"' 0
+# Shared jq definitions: parse the yt-dlp archive file into an index, then keep
+# only entries whose extractor/id pair is NOT in it (extractor compared
+# case-insensitively, video id exact) - same semantics as the original filter.
+_ytx_af_jqdefs='
+  def af_rows($a):
+    ($a
+     | split("\n")
+     | map(sub("\r$"; ""))
+     | map(select(length > 0 and (startswith("#") | not)))
+     | map(
+         try capture(
+           "^(?<extractor>[^[:space:]]+)[[:space:]]+(?<id>[^[:space:]]+)"
+         ) catch empty
+       )
+     | reduce .[] as $row
+         ({}; .[(($row.extractor | ascii_downcase) + " " + $row.id)] = true)
+    );
+  def af_keep($index):
+    ((.ie_key // .extractor_key // .extractor // "") | tostring) as $extractor
+    | ((.id // "") | tostring) as $id
+    | ($index | has(($extractor | ascii_downcase) + " " + $id)) | not;
+'
 
-"$real" "$@" > "$tmp"
-status=$?
+# Original single-shot filter: fetch the caller's own window once and strip
+# archived entries. Used for non-windowed calls and as the fallback whenever
+# the gap-fill machinery cannot run. (Own mktemp files are removed explicitly;
+# the window path's trap 0 stays active and cleans its own files on exit.)
+_ytx_af_plain() {
+    printf 'plain fallback; args=%s\n' "$*" \
+        >> "${TMPDIR:-/tmp}/yt-x-archive-filter-debug.log"
+    _ytx_af_ptmp=$(mktemp "${TMPDIR:-/tmp}/ytx-af-plain.XXXXXX") || exec "$real" "$@"
+    _ytx_af_pout="${_ytx_af_ptmp}.filtered"
 
-# Preserve yt-dlp's output and error status if extraction failed.
-if [ "$status" -ne 0 ]; then
-    cat "$tmp"
-    exit "$status"
+    "$real" "$@" > "$_ytx_af_ptmp"
+    _ytx_af_pstatus=$?
+
+    if [ "$_ytx_af_pstatus" -ne 0 ]; then
+        cat "$_ytx_af_ptmp"
+        rm -f "$_ytx_af_ptmp"
+        exit "$_ytx_af_pstatus"
+    fi
+
+    if jq "$_ytx_af_jqdefs"'
+      (af_rows($arc)) as $index
+      | if (.entries | type) == "array" then
+            .entries |= map(select(af_keep($index)))
+        else
+            .
+        end
+    ' --rawfile arc "$archive" "$_ytx_af_ptmp" > "$_ytx_af_pout" 2>/dev/null; then
+        cat "$_ytx_af_pout"
+    else
+        cat "$_ytx_af_ptmp"
+    fi
+
+    rm -f "$_ytx_af_ptmp" "$_ytx_af_pout"
+    exit 0
+}
+
+# ---- yt-x pagination window (gap-fill) --------------------------------------
+# yt-x pages playlists with --playlist-start/--playlist-end; the window size
+# comes from the caller (CONFIG_PER_PAGE, user-definable) and is read straight
+# from argv here - it is NEVER assumed or capped. The LAST occurrence of each
+# flag wins, matching yt-dlp's argparse (verified 2026-11-06) - yt-x appends
+# its custom opts after its own flags.
+_ytx_af_start=""
+_ytx_af_end=""
+_ytx_af_prev=""
+_ytx_af_url=""
+for _ytx_af_arg do
+    case "$_ytx_af_prev" in
+        start) _ytx_af_start=$_ytx_af_arg; _ytx_af_prev=""; continue ;;
+        end)   _ytx_af_end=$_ytx_af_arg;   _ytx_af_prev=""; continue ;;
+    esac
+    case "$_ytx_af_arg" in
+        --playlist-start=*) _ytx_af_start=${_ytx_af_arg#*=} ;;
+        --playlist-end=*)   _ytx_af_end=${_ytx_af_arg#*=} ;;
+        --playlist-start)   _ytx_af_prev=start ;;
+        --playlist-end)     _ytx_af_prev=end ;;
+        -*) ;;
+        *) [ -z "$_ytx_af_url" ] && _ytx_af_url=$_ytx_af_arg ;;
+    esac
+done
+
+_ytx_af_window=false
+case "$_ytx_af_start" in
+    ''|*[!0-9]*) ;;
+    *)
+        case "$_ytx_af_end" in
+            ''|*[!0-9]*) ;;
+            *)
+                [ "$_ytx_af_end" -ge "$_ytx_af_start" ] && _ytx_af_window=true
+                ;;
+        esac
+        ;;
+esac
+
+if [ "$_ytx_af_window" != true ]; then
+    _ytx_af_plain "$@"
 fi
 
-# Standard yt-dlp archive rows are: extractor ID.
-# Compare extractor names case-insensitively; video IDs remain exact.
-if jq --rawfile archive "$archive" '
-    def archive_rows:
-        $archive
-        | split("\n")
-        | map(sub("\r$"; ""))
-        | map(select(length > 0 and (startswith("#") | not)))
-        | map(
-            try capture(
-                "^(?<extractor>[^[:space:]]+)[[:space:]]+(?<id>[^[:space:]]+)"
-            ) catch empty
-          );
+_ytx_af_dir=${YT_X_AF_STATE_DIR:-${CLI_CACHE_DIR:-${TMPDIR:-/tmp}}/archive-filter-state}
+_ytx_af_ttl=${YT_X_AF_TTL:-900}
+_ytx_af_now=$(date +%s)
 
-    def archive_key($extractor; $id):
-        ($extractor | ascii_downcase) + "\u0000" + $id;
+_ytx_af_key=$(printf '%s' "$_ytx_af_url" | cksum 2>/dev/null | cut -d' ' -f1)
+case "$_ytx_af_key" in ''|*[!0-9]*) _ytx_af_key=0 ;; esac
 
-    def is_archived($entry; $index):
-        (($entry.ie_key // $entry.extractor_key // $entry.extractor // "") | tostring)
-            as $extractor
-        | (($entry.id // "") | tostring) as $id
-        | $index | has(archive_key($extractor; $id));
+mkdir -p "$_ytx_af_dir" 2>/dev/null || _ytx_af_plain "$@"
 
-    archive_rows as $rows
-    | ($rows
-       | reduce .[] as $row
-           ({}; .[archive_key($row.extractor; $row.id)] = true)
-      ) as $index
-    | if (.entries | type) == "array" then
-          .entries |= map(select(is_archived(.; $index) | not))
-      else
-          .
-      end
-' "$tmp" > "$out" 2>/dev/null; then
-    cat "$out"
-else
-    # If the output isn't the expected JSON shape, leave it untouched.
-    cat "$tmp"
+# Old cache entries from other playlists are dropped after a day.
+find "$_ytx_af_dir" -name '*.json' -mmin +1440 -delete 2>/dev/null
+
+_ytx_af_state="$_ytx_af_dir/$_ytx_af_key.json"
+
+# Fresh state for this playlist URL (or reset when the cache went stale).
+_ytx_af_ts=$(jq -r '.ts // 0' "$_ytx_af_state" 2>/dev/null) || _ytx_af_ts=0
+case "$_ytx_af_ts" in ''|*[!0-9]*) _ytx_af_ts=0 ;; esac
+if [ $((_ytx_af_now - _ytx_af_ts)) -gt "$_ytx_af_ttl" ]; then
+    jq -n --argjson now "$_ytx_af_now" \
+        '{ts:$now, raw_end:0, exhausted:false, base:null, raw:[]}' \
+        > "$_ytx_af_state" 2>/dev/null || _ytx_af_plain "$@"
 fi
 
-exit 0
+_ytx_af_tmp=$(mktemp "${TMPDIR:-/tmp}/ytx-af-state.XXXXXX") || _ytx_af_plain "$@"
+_ytx_af_fetch=$(mktemp "${TMPDIR:-/tmp}/ytx-af-fetch.XXXXXX") || _ytx_af_plain "$@"
+trap 'rm -f "$_ytx_af_tmp" "$_ytx_af_fetch"' 0
+
+# Fetch ahead until the ARCHIVED-FILTERED sequence covers the requested
+# window end (or the playlist is exhausted). yt-dlp's own range flags are
+# overridden by appending ours last (last-wins). The next chunk is sized from
+# the observed survival ratio (filtered/raw) so heavily-archived playlists
+# still fill in a couple of fetches; floor is 2x the remaining deficit.
+# have is recomputed EVERY iteration with the CURRENT archive file, so entries
+# archived mid-session are honoured immediately.
+_ytx_af_iter=0
+while [ "$_ytx_af_iter" -lt 8 ]; do
+    _ytx_af_iter=$((_ytx_af_iter + 1))
+    _ytx_af_have=$(jq -r --rawfile arc "$archive" \
+        "$_ytx_af_jqdefs"'
+      (af_rows($arc)) as $index
+      | [.raw[] | select(af_keep($index))] | length
+    ' "$_ytx_af_state" 2>/dev/null)
+    _ytx_af_ex=$(jq -r '.exhausted // false' "$_ytx_af_state" 2>/dev/null)
+    _ytx_af_raw=$(jq -r '.raw_end // 0' "$_ytx_af_state" 2>/dev/null)
+    case "$_ytx_af_have" in ''|*[!0-9]*) _ytx_af_have=0 ;; esac
+    case "$_ytx_af_raw" in ''|*[!0-9]*) _ytx_af_raw=0 ;; esac
+
+    [ "$_ytx_af_ex" = true ] && break
+    [ "$_ytx_af_have" -ge "$_ytx_af_end" ] && break
+
+    _ytx_af_deficit=$((_ytx_af_end - _ytx_af_have))
+    [ "$_ytx_af_deficit" -le 0 ] && break
+    _ytx_af_from=$((_ytx_af_raw + 1))
+
+    if [ "$_ytx_af_have" -gt 0 ] && [ "$_ytx_af_raw" -gt 0 ]; then
+        _ytx_af_need=$((_ytx_af_deficit * _ytx_af_raw / _ytx_af_have + 1))
+    else
+        _ytx_af_need=0
+    fi
+    _ytx_af_floor=$((2 * _ytx_af_deficit))
+    [ "$_ytx_af_need" -lt "$_ytx_af_floor" ] && _ytx_af_need=$_ytx_af_floor
+    _ytx_af_to=$((_ytx_af_from + _ytx_af_need - 1))
+
+    "$real" "$@" --playlist-start "$_ytx_af_from" --playlist-end "$_ytx_af_to" \
+        > "$_ytx_af_fetch"
+    _ytx_af_rc=$?
+    if [ "$_ytx_af_rc" -ne 0 ]; then
+        if [ "$_ytx_af_have" -gt 0 ]; then
+            break
+        fi
+        _ytx_af_plain "$@"
+    fi
+
+    jq "$_ytx_af_jqdefs"'
+      ($f[0]
+       | if type == "object" then
+             (.entries // [] | if type == "array" then . else [] end)
+         else
+             []
+         end) as $got
+      | .raw += $got
+      | .raw_end = $to
+      | .exhausted = (($got | length) < ($to - $from + 1))
+      | .base = (if (.base == null) and (($f[0] | type) == "object")
+                 then ($f[0] | del(.entries))
+                 else .base end)
+      | .ts = $now
+    ' --slurpfile f "$_ytx_af_fetch" \
+      --argjson from "$_ytx_af_from" --argjson to "$_ytx_af_to" \
+      --argjson now "$_ytx_af_now" \
+      "$_ytx_af_state" > "$_ytx_af_tmp" 2>/dev/null &&
+        mv "$_ytx_af_tmp" "$_ytx_af_state" ||
+        break
+done
+
+# No usable base object (first fetch never produced one) -> plain fallback.
+jq -e '.base != null and (.raw | type == "array")' \
+    "$_ytx_af_state" >/dev/null 2>&1 || _ytx_af_plain "$@"
+
+# Serve filtered[S-1:E] (0-based slice of the RENUMBERED filtered sequence):
+# hiding item #1 promotes #2 to new #1, so every page is exactly as full as
+# the caller's window allows and a short page only ever means the playlist
+# genuinely ran out.
+if jq "$_ytx_af_jqdefs"'
+  . as $st
+  | (af_rows($arc)) as $index
+  | ($st.base // {})
+    + {entries: ([$st.raw[] | select(af_keep($index))][($s - 1):$e])}
+' --rawfile arc "$archive" --argjson s "$_ytx_af_start" --argjson e "$_ytx_af_end" \
+    "$_ytx_af_state"; then
+    printf 'gapfill; start=%s end=%s have=%s iter=%s\n' \
+        "$_ytx_af_start" "$_ytx_af_end" "$_ytx_af_have" "$_ytx_af_iter" \
+        >> "${TMPDIR:-/tmp}/yt-x-archive-filter-debug.log"
+    exit 0
+fi
+
+_ytx_af_plain "$@"
 YT_X_ARCHIVE_FILTER_SHIM
 
 chmod 700 "$_YTX_AF_SHIM_DIR/yt-dlp" || {
-    printf '%s\n' "archive-filter: could not make the yt-dlp shim executable." >&2
+    printf '%s\n' \
+        "archive-filter: could not make the yt-dlp shim executable." >&2
     return 0
 }
 
 YT_X_ARCHIVE_FILTER_REAL_YTDLP=$_YTX_AF_REAL_YTDLP
 YT_X_ARCHIVE_FILTER_FILE=$CONFIG_ARCHIVE_FILTER_FILE
-export YT_X_ARCHIVE_FILTER_REAL_YTDLP YT_X_ARCHIVE_FILTER_FILE
+YT_X_AF_STATE_DIR="$CLI_CACHE_DIR/archive-filter-state"
+export YT_X_ARCHIVE_FILTER_REAL_YTDLP YT_X_ARCHIVE_FILTER_FILE YT_X_AF_STATE_DIR
 
 # yt-x and its child processes will now find the filtering shim first.
 PATH="$_YTX_AF_SHIM_DIR:$PATH"
